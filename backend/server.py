@@ -75,7 +75,7 @@ async def loopless_preload() -> None:
     await _preload_presets()
 
 
-app = FastAPI(title="TrafficAI signal comparison", lifespan=lifespan)
+app = FastAPI(title="TrafficLearner signal comparison", lifespan=lifespan)
 allowed_origins = {
     "https://schrodi-o-ao.github.io",
     "http://localhost:8000",

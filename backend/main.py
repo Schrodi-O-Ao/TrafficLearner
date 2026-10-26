@@ -1,12 +1,12 @@
 """
-main.py: entry point for the TrafficAI API server.
-Run from the TrafficAI/ root directory:
+main.py: entry point for the TrafficLearner API server.
+Run from the TrafficLearner/ root directory:
     python backend/main.py
 """
 import os
 import sys
 
-# Ensure the TrafficAI root is on the path (so sim.py etc. are importable)
+# Ensure the TrafficLearner root is on the path (so sim.py etc. are importable)
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT_DIR)
 

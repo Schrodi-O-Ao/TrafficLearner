@@ -1,4 +1,4 @@
-name: Publish TrafficAI site
+name: Publish TrafficLearner site
 
 on:
   push:

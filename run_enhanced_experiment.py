@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Run TrafficAI training and evaluation experiment pipeline."""
+"""Run TrafficLearner training and evaluation experiment pipeline."""
 
 from __future__ import annotations
 
@@ -32,7 +31,7 @@ def run_command(cmd: list[str], description: str) -> bool:
 
 def main() -> None:
     """Parse experiment options, train model, and run paired evaluation."""
-    parser = argparse.ArgumentParser(description="Run TrafficAI experiment pipeline")
+    parser = argparse.ArgumentParser(description="Run TrafficLearner experiment pipeline")
     parser.add_argument("--agent_type", type=str, default="tabular", choices=["tabular", "neural"],
                         help="RL agent type")
     parser.add_argument("--episodes", type=int, default=50, help="Training episodes")
@@ -49,7 +48,7 @@ def main() -> None:
         args.episode_length = min(args.episode_length, 300)
         print("Quick test mode: reduced parameters for fast testing")
     
-    print("TrafficAI Experiment Runner")
+    print("TrafficLearner Experiment Runner")
     print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Agent Type: {args.agent_type}")
     print(f"Settings: episodes={args.episodes}, episode_length={args.episode_length}, seed={args.seed}")

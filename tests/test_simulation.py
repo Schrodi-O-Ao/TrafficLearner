@@ -1,4 +1,4 @@
-"""Unit tests for TrafficAI traffic light and intersection simulation."""
+"""Unit tests for TrafficLearner traffic light and intersection simulation."""
 
 import pytest
 from simulation import Intersection, SignalPhase, TrafficLight, create_scenario

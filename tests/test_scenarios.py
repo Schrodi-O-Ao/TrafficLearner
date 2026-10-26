@@ -59,3 +59,18 @@ def test_load_from_csv():
         import os
         if os.path.exists(path):
             os.remove(path)
+
+
+def test_load_from_bremen_csv():
+    """Verify CSV loader recognizes real-world dataset formats like CN+ Bremen."""
+    csv_content = (
+        "Data Collection Date,Crossing Timing,Vehicle Direction,Number of Vehicles,Vehicle Type\n"
+        "2022-05-24,08:00:05.120,North-South,1,Car\n"
+        "2022-05-24,08:00:12.450,West-East,1,Car\n"
+        "2022-05-24,08:01:22.000,South-North,1,Van\n"
+        "2022-05-24,08:02:15.800,East-West,1,Car\n"
+    )
+    rows = load_from_csv(csv_content.encode("utf-8"))
+    assert len(rows) == 48
+    directions = {r["direction"] for r in rows}
+    assert directions == {"N", "S", "E", "W"}
