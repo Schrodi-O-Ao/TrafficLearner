@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://schrodi-o-ao.github.io/Traffic-learner/sitemap.xml
