@@ -1,0 +1,7 @@
+# Small dependency set for the FastAPI/WebSocket service on a free web host.
+# PyTorch, pandas, and Matplotlib stay out of this runtime; the web API uses
+# the tabular controller and does not train a neural network.
+numpy
+fastapi
+uvicorn[standard]
+python-multipart

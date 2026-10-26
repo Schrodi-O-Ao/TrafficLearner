@@ -1,0 +1,9 @@
+numpy
+matplotlib
+torch
+fastapi
+uvicorn[standard]
+websockets
+pydantic
+pandas
+python-multipart
