@@ -1,9 +1,9 @@
-# TrafficAI
+# TrafficLearner
 
 [![Python](https://img.shields.io/badge/Python-simulation-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 
-TrafficAI is an intersection traffic simulator and reinforcement learning benchmark. Its command-line evaluator compares fixed-time, queue-actuated, and tabular Q-learning controllers on shared seeded arrivals. The browser interface streams and visualizes matched controller executions.
+TrafficLearner is an intersection traffic simulator and reinforcement learning benchmark. Its command-line evaluator compares fixed-time, queue-actuated, and tabular Q-learning controllers on shared seeded arrivals. The browser interface streams and visualizes matched controller executions.
 
 ## Architecture
 
