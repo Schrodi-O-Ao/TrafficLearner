@@ -74,3 +74,58 @@ def test_load_from_bremen_csv():
     assert len(rows) == 48
     directions = {r["direction"] for r in rows}
     assert directions == {"N", "S", "E", "W"}
+
+
+def test_map_direction_string_bremen():
+    """Verify Bremen direction numbers and SUMO routes map correctly to 4 approaches."""
+    from backend.data_ingest import _map_direction_string
+    assert _map_direction_string("Direction 1") == "N"
+    assert _map_direction_string("Direction 6") == "W"
+    assert _map_direction_string("Direction 8") == "S"
+    assert _map_direction_string("Direction 13") == "E"
+    assert _map_direction_string("route_12") == "E"
+    assert _map_direction_string("route_0") == "N"
+
+
+def test_load_from_bremen_ods_format_csv():
+    """Verify CSV with original CN+ Bremen columns Date, Time, Direction, Number."""
+    from backend.data_ingest import load_traffic_dataset
+    csv_content = (
+        "Date,Time,Direction,Number,Type,Temperature\n"
+        "2022.05.24,17:00:01,Direction 13,2,Normal,61 °F\n"
+        "2022.05.24,17:00:24,Direction 6,3,Normal,61 °F\n"
+        "2022.05.24,17:01:05,Direction 1,1,Normal,61 °F\n"
+        "2022.05.24,17:01:30,Direction 8,1,Normal,61 °F\n"
+    )
+    rows = load_traffic_dataset(csv_content.encode("utf-8"), filename="CN+ Dataset.csv")
+    assert len(rows) == 48
+    directions = {r["direction"] for r in rows}
+    assert directions == {"N", "S", "E", "W"}
+
+
+def test_load_from_sumo_xml():
+    """Verify SUMO .rou.xml route files are parsed directly."""
+    from backend.data_ingest import load_traffic_dataset
+    xml_content = (
+        "<routes>\n"
+        "  <vehicle id=\"v0\" depart=\"1.0\" route=\"route_0\"/>\n"
+        "  <vehicle id=\"v1\" depart=\"2.5\" route=\"route_12\"/>\n"
+        "</routes>"
+    )
+    rows = load_traffic_dataset(xml_content.encode("utf-8"), filename="scenario.rou.xml")
+    assert len(rows) == 48
+
+
+def test_load_from_zip():
+    """Verify ZIP archives containing traffic datasets are extracted and parsed."""
+    import zipfile
+    import io
+    from backend.data_ingest import load_traffic_dataset
+
+    csv_data = b"time_seconds,direction,arrival_rate\n0,N,0.1\n0,S,0.1\n"
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as zf:
+        zf.writestr("traffic.csv", csv_data)
+
+    rows = load_traffic_dataset(zip_buffer.getvalue(), filename="dataset.zip")
+    assert len(rows) == 2

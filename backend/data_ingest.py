@@ -6,6 +6,8 @@ import csv
 import io
 import math
 import re
+import xml.etree.ElementTree as ET
+import zipfile
 
 import numpy as np
 
@@ -49,28 +51,252 @@ def _parse_time_string(val: str) -> float | None:
 
 
 def _map_direction_string(dir_str: str) -> str | None:
-    """Map flexible direction names (North, NB, N-S, N, 1, etc.) to N, S, E, or W."""
+    """Map flexible direction names (North, NB, N-S, Direction 13, route_12, etc.) to N, S, E, or W."""
     cleaned = str(dir_str).strip().upper()
     if not cleaned:
         return None
     # Direct match
     if cleaned in DIRECTIONS:
         return cleaned
+
+    # Check for Bremen numbered movement: Direction 1..14, Dir 1..14, route_12
+    num_match = re.search(r"(?:DIRECTION|DIR|ROUTE_?)\s*(\d+)", cleaned)
+    if num_match:
+        raw_num = int(num_match.group(1))
+        # SUMO route_0..route_13 (0-indexed) to 1-indexed direction
+        num = raw_num + 1 if "ROUTE" in cleaned and raw_num < 15 else raw_num
+        # Bremen 4-arm intersection mapping:
+        # Approach 1 (North): Directions 1, 2, 3, 15, 16, 17
+        # Approach 2 (East): Directions 11, 12, 13, 14, 18, 19
+        # Approach 3 (West): Directions 4, 5, 6, 7
+        # Approach 4 (South): Directions 8, 9, 10
+        if num in (1, 2, 3, 15, 16, 17):
+            return "N"
+        if num in (4, 5, 6, 7):
+            return "W"
+        if num in (8, 9, 10):
+            return "S"
+        if num in (11, 12, 13, 14, 18, 19):
+            return "E"
+        return ("N", "S", "E", "W")[(num - 1) % 4]
+
+    # Bare integer: "1" -> "N", "2" -> "S", "3" -> "E", "4" -> "W"
+    if cleaned.isdigit():
+        num = int(cleaned)
+        if num in (1, 2, 3, 15, 16, 17):
+            return "N"
+        if num in (4, 5, 6, 7):
+            return "W"
+        if num in (8, 9, 10):
+            return "S"
+        if num in (11, 12, 13, 14, 18, 19):
+            return "E"
+        return ("N", "S", "E", "W")[(num - 1) % 4]
+
     # Common prefixes and turning movements
-    if cleaned.startswith("N") or cleaned in ("1", "NORTH", "NORTHBOUND", "NORTH-SOUTH", "N-S", "N->S"):
+    if cleaned.startswith("N") or cleaned in ("NORTH", "NORTHBOUND", "NORTH-SOUTH", "N-S", "N->S"):
         return "N"
-    if cleaned.startswith("S") or cleaned in ("2", "SOUTH", "SOUTHBOUND", "SOUTH-NORTH", "S-N", "S->N"):
+    if cleaned.startswith("S") or cleaned in ("SOUTH", "SOUTHBOUND", "SOUTH-NORTH", "S-N", "S->N"):
         return "S"
-    if cleaned.startswith("E") or cleaned in ("3", "EAST", "EASTBOUND", "EAST-WEST", "E-W", "E->W"):
+    if cleaned.startswith("E") or cleaned in ("EAST", "EASTBOUND", "EAST-WEST", "E-W", "E->W"):
         return "E"
-    if cleaned.startswith("W") or cleaned in ("4", "WEST", "WESTBOUND", "WEST-EAST", "W-E", "W->E"):
+    if cleaned.startswith("W") or cleaned in ("WEST", "WESTBOUND", "WEST-EAST", "W-E", "W->E"):
         return "W"
     return None
+
+
+def _build_dataset_from_raw_records(raw_records: list[tuple[float, str, float]], is_prebinned_rate: bool = False) -> list[dict]:
+    """Convert raw or binned traffic entries into standard piecewise 5-minute interval rows."""
+    if not raw_records:
+        raise ValueError("Dataset contains no recognizable traffic entries.")
+
+    if is_prebinned_rate:
+        dataset = [{"time": float(t), "direction": d, "rate": float(r)} for t, d, r in raw_records]
+        return sorted(dataset, key=lambda row: (row["direction"], row["time"]))
+
+    # Aggregate raw vehicle passages into standard 300-second windows across 3600 seconds
+    min_time = min(t for t, _, _ in raw_records)
+    window_counts: dict[tuple[int, str], float] = {}
+    for t, d, count in raw_records:
+        rel_time = t - min_time
+        if rel_time < 0 or rel_time >= MAX_SIMULATION_SECONDS:
+            continue
+        window_idx = int(rel_time // 300.0)
+        key = (window_idx, d)
+        window_counts[key] = window_counts.get(key, 0.0) + (count if count > 0 else 1.0)
+
+    dataset = []
+    for window_idx in range(12):  # 12 x 300s = 3600s
+        time_sec = float(window_idx * 300)
+        for direction in DIRECTIONS:
+            count = window_counts.get((window_idx, direction), 0.0)
+            if count > 0:
+                rate = round(min(MAX_ARRIVAL_RATE, max(0.01, count / 300.0)), 4)
+            else:
+                rate = 0.03  # default baseline flow
+            dataset.append({"time": time_sec, "direction": direction, "rate": rate})
+
+    return sorted(dataset, key=lambda row: (row["direction"], row["time"]))
+
+
+def load_from_ods(filepath_or_bytes) -> list[dict]:
+    """Read OpenDocument Spreadsheet (.ods) files, such as the official CN+ Bremen release."""
+    if isinstance(filepath_or_bytes, (bytes, bytearray)):
+        zfile = zipfile.ZipFile(io.BytesIO(filepath_or_bytes))
+    else:
+        zfile = zipfile.ZipFile(filepath_or_bytes)
+
+    with zfile:
+        try:
+            content_xml = zfile.read("content.xml")
+        except KeyError:
+            raise ValueError("Invalid ODS file: content.xml not found inside archive.")
+
+    root = ET.fromstring(content_xml)
+    ns_table = "{urn:oasis:names:tc:opendocument:xmlns:table:1.0}"
+    rows = root.findall(".//" + ns_table + "table-row")
+    if not rows:
+        raise ValueError("ODS spreadsheet contains no data rows.")
+
+    header: list[str] | None = None
+    time_idx = 1
+    dir_idx = 2
+    count_idx = 3
+
+    raw_records: list[tuple[float, str, float]] = []
+    for r in rows:
+        cells: list[str] = []
+        for c in r.findall(".//" + ns_table + "table-cell"):
+            rep = int(c.attrib.get(ns_table + "number-columns-repeated", 1))
+            txt = "".join(c.itertext()).strip()
+            cells.extend([txt] * min(rep, 20))
+        if not any(cells):
+            continue
+
+        if header is None:
+            header = [c.lower() for c in cells]
+            for idx, col in enumerate(header):
+                if any(k in col for k in ("time", "crossing", "second")):
+                    time_idx = idx
+                elif any(k in col for k in ("direction", "dir", "approach")):
+                    dir_idx = idx
+                elif any(k in col for k in ("number", "count", "vehicle", "volume")):
+                    count_idx = idx
+            continue
+
+        if len(cells) <= max(time_idx, dir_idx):
+            continue
+
+        t_val = _parse_time_string(cells[time_idx])
+        if t_val is None:
+            continue
+        d_val = _map_direction_string(cells[dir_idx])
+        if d_val is None:
+            continue
+
+        count_val = 1.0
+        if len(cells) > count_idx and cells[count_idx]:
+            try:
+                count_val = float(cells[count_idx])
+            except ValueError:
+                count_val = 1.0
+
+        raw_records.append((t_val, d_val, count_val))
+        if len(raw_records) >= MAX_DATASET_ROWS:
+            break
+
+    return _build_dataset_from_raw_records(raw_records)
+
+
+def load_from_sumo_xml(filepath_or_bytes) -> list[dict]:
+    """Parse SUMO scenario route XML files (<routes><vehicle depart=... route=... /></routes>)."""
+    if isinstance(filepath_or_bytes, (bytes, bytearray)):
+        source = io.BytesIO(filepath_or_bytes)
+    else:
+        source = open(filepath_or_bytes, "rb")
+
+    try:
+        tree = ET.parse(source)
+        root = tree.getroot()
+        raw_records: list[tuple[float, str, float]] = []
+        for v in root.findall(".//vehicle"):
+            depart = v.attrib.get("depart")
+            route = v.attrib.get("route", "")
+            if depart is not None:
+                try:
+                    t_val = float(depart)
+                    d_val = _map_direction_string(route) or "N"
+                    raw_records.append((t_val, d_val, 1.0))
+                except ValueError:
+                    continue
+        if not raw_records:
+            raise ValueError("No vehicle departures found in SUMO route XML.")
+        return _build_dataset_from_raw_records(raw_records)
+    finally:
+        if not isinstance(filepath_or_bytes, (bytes, bytearray)):
+            source.close()
+
+
+def load_from_zip(filepath_or_bytes) -> list[dict]:
+    """Extract and parse traffic datasets from ZIP archives (supporting .ods, .csv, and SUMO .rou.xml)."""
+    if isinstance(filepath_or_bytes, (bytes, bytearray)):
+        zfile = zipfile.ZipFile(io.BytesIO(filepath_or_bytes))
+    else:
+        zfile = zipfile.ZipFile(filepath_or_bytes)
+
+    with zfile:
+        names = zfile.namelist()
+        # 1. Prefer .ods spreadsheet (e.g. CN+ Dataset.ods)
+        ods_candidates = [n for n in names if n.lower().endswith(".ods") and not n.startswith("__MACOSX")]
+        if ods_candidates:
+            return load_from_ods(zfile.read(ods_candidates[0]))
+
+        # 2. Prefer .csv files
+        csv_candidates = [n for n in names if n.lower().endswith(".csv") and not n.startswith("__MACOSX")]
+        if csv_candidates:
+            return load_from_csv(zfile.read(csv_candidates[0]))
+
+        # 3. Prefer SUMO .rou.xml route files
+        xml_candidates = [n for n in names if n.lower().endswith(".rou.xml") and not n.startswith("__MACOSX")]
+        if xml_candidates:
+            return load_from_sumo_xml(zfile.read(xml_candidates[0]))
+
+    raise ValueError("ZIP archive contains no recognized traffic dataset (.ods, .csv, or .rou.xml).")
+
+
+def load_traffic_dataset(filepath_or_bytes, filename: str | None = None) -> list[dict]:
+    """Auto-detect format (ZIP, ODS, SUMO XML, or CSV) and parse into standard traffic dataset."""
+    name = (filename or (filepath_or_bytes if isinstance(filepath_or_bytes, str) else "")).lower()
+
+    if isinstance(filepath_or_bytes, (bytes, bytearray)):
+        magic = bytes(filepath_or_bytes[:4])
+        if magic.startswith(b"PK\x03\x04"):
+            if name.endswith(".ods"):
+                return load_from_ods(filepath_or_bytes)
+            try:
+                return load_from_ods(filepath_or_bytes)
+            except Exception:
+                return load_from_zip(filepath_or_bytes)
+        if magic.startswith(b"<?xm") or magic.startswith(b"<rou") or name.endswith(".xml") or name.endswith(".rou.xml"):
+            return load_from_sumo_xml(filepath_or_bytes)
+        return load_from_csv(filepath_or_bytes)
+
+    if name.endswith(".zip"):
+        return load_from_zip(filepath_or_bytes)
+    if name.endswith(".ods"):
+        return load_from_ods(filepath_or_bytes)
+    if name.endswith(".xml") or name.endswith(".rou.xml"):
+        return load_from_sumo_xml(filepath_or_bytes)
+    return load_from_csv(filepath_or_bytes)
 
 
 def load_from_csv(filepath_or_bytes) -> list[dict]:
     """Read a CSV file supporting standard TrafficLearner schedules or datasets like CN+ Bremen."""
     if isinstance(filepath_or_bytes, (bytes, bytearray)):
+        magic = bytes(filepath_or_bytes[:4])
+        if magic.startswith(b"PK\x03\x04") or magic.startswith(b"<?xm"):
+            return load_traffic_dataset(filepath_or_bytes)
+
         for enc in ("utf-8-sig", "utf-8", "latin-1", "cp1252"):
             try:
                 text_content = filepath_or_bytes.decode(enc)
@@ -82,6 +308,10 @@ def load_from_csv(filepath_or_bytes) -> list[dict]:
         source = io.StringIO(text_content)
         close_source = False
     else:
+        path_str = str(filepath_or_bytes).lower()
+        if path_str.endswith(".zip") or path_str.endswith(".ods") or path_str.endswith(".xml"):
+            return load_traffic_dataset(filepath_or_bytes)
+
         source = open(filepath_or_bytes, "r", encoding="utf-8-sig", newline="")
         close_source = True
 
@@ -123,7 +353,7 @@ def load_from_csv(filepath_or_bytes) -> list[dict]:
         rate_col = None
         for cand in (
             "arrival_rate", "rate", "vehicle_count", "vehicle count", "number of vehicles",
-            "number_of_vehicles", "count", "volume", "vehicles", "flow"
+            "number_of_vehicles", "number", "count", "volume", "vehicles", "flow"
         ):
             if cand in normalized_headers:
                 rate_col = normalized_headers[cand]
@@ -160,15 +390,14 @@ def load_from_csv(filepath_or_bytes) -> list[dict]:
             if rate_col and original_row.get(rate_col) not in (None, ""):
                 try:
                     parsed_val = float(original_row[rate_col])
-                    # If the column name implies rate and is <= 1.0, treat as arrival rate
                     if "rate" in rate_col.lower() and parsed_val <= 1.0:
                         rate_val = parsed_val
                     else:
-                        rate_val = parsed_val  # will be aggregated as count
+                        rate_val = parsed_val
                 except ValueError:
                     rate_val = 1.0
             else:
-                rate_val = 1.0  # 1 passage event
+                rate_val = 1.0
 
             raw_records.append((t_val, d_val, rate_val))
 
@@ -176,48 +405,15 @@ def load_from_csv(filepath_or_bytes) -> list[dict]:
         if close_source:
             source.close()
 
-    if not raw_records:
-        raise ValueError("CSV contains no recognizable traffic entries.")
-
-    # Determine if this is an already-binned schedule (like sample_traffic.csv with explicit arrival_rate <= 0.5)
-    # or raw individual vehicle passages (like CN+ Bremen dataset)
     is_prebinned_rate = (
         len(raw_records) <= 120
-        and rate_col
+        and rate_col is not None
         and "rate" in rate_col.lower()
         and all(0 <= r <= MAX_ARRIVAL_RATE for _, _, r in raw_records)
         and all(0 <= t <= MAX_SIMULATION_SECONDS for t, _, _ in raw_records)
     )
 
-    if is_prebinned_rate:
-        dataset = [{"time": float(t), "direction": d, "rate": float(r)} for t, d, r in raw_records]
-        return sorted(dataset, key=lambda row: (row["direction"], row["time"]))
-
-    # Aggregate raw vehicle passages into standard 300-second windows across 3600 seconds
-    min_time = min(t for t, _, _ in raw_records)
-    # Group by (window_index, direction)
-    window_counts: dict[tuple[int, str], float] = {}
-    for t, d, count in raw_records:
-        rel_time = t - min_time
-        if rel_time < 0 or rel_time >= MAX_SIMULATION_SECONDS:
-            continue
-        window_idx = int(rel_time // 300.0)
-        key = (window_idx, d)
-        window_counts[key] = window_counts.get(key, 0.0) + (count if count > 0 else 1.0)
-
-    dataset = []
-    for window_idx in range(12):  # 12 x 300s = 3600s
-        time_sec = float(window_idx * 300)
-        for direction in DIRECTIONS:
-            count = window_counts.get((window_idx, direction), 0.0)
-            # Convert 5-minute vehicle count to rate per second (capped at MAX_ARRIVAL_RATE)
-            if count > 0:
-                rate = round(min(MAX_ARRIVAL_RATE, max(0.01, count / 300.0)), 4)
-            else:
-                rate = 0.03  # default baseline flow
-            dataset.append({"time": time_sec, "direction": direction, "rate": rate})
-
-    return sorted(dataset, key=lambda row: (row["direction"], row["time"]))
+    return _build_dataset_from_raw_records(raw_records, is_prebinned_rate=is_prebinned_rate)
 
 
 def dataset_to_arrival_rates(dataset: list[dict], window_start: float, window_end: float) -> dict[str, float]:

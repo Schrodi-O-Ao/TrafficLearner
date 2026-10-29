@@ -89,15 +89,15 @@
                         </div>
 
                         <div class="form-group">
-                            <label class="form-label" for="csv-upload">Or upload a demand CSV</label>
+                            <label class="form-label" for="csv-upload">Or upload traffic dataset</label>
                             <div class="file-input-wrapper">
-                                <input type="file" id="csv-upload" accept=".csv,text/csv">
+                                <input type="file" id="csv-upload" accept=".csv,.ods,.zip,.xml,.rou.xml,.txt,.tsv,text/csv,text/plain,application/zip,application/x-zip-compressed,application/vnd.oasis.opendocument.spreadsheet,application/xml,text/xml,*">
                                 <div id="csv-status-badge" class="file-badge hidden">
                                     <span id="csv-file-name" class="file-badge-name"></span>
                                     <button type="button" id="csv-clear-btn" class="file-badge-clear" aria-label="Remove uploaded file">&times;</button>
                                 </div>
                             </div>
-                            <p class="field-hint">Supports standard schedules or datasets like <strong>CN+ Bremen</strong>. Auto-detects columns, timestamps, and directions (N, S, E, W).</p>
+                            <p class="field-hint">Supports <strong>CN+ Bremen</strong> (.zip, .ods, .csv, SUMO .rou.xml) or custom schedules. Files are parsed instantly in-browser.</p>
                         </div>
 
                         <div class="form-group">

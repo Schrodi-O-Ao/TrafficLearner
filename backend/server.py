@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backend.data_ingest import load_from_csv
+from backend.data_ingest import load_from_csv, load_traffic_dataset
 from backend.runner import load_policy, run_comparison, stream_comparison
 from backend.scenario import Scenario
 from scenario_profiles import PRESET_PROFILES
@@ -35,7 +35,7 @@ PRESET_DESCRIPTIONS = {
     "t_junction": "Three-way T-intersection with North, South, and East approaches.",
 }
 MAX_SCENARIOS = 50
-MAX_UPLOAD_BYTES = 2 * 1024 * 1024
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 executor = ThreadPoolExecutor(max_workers=4)
 scenarios: dict[str, tuple[Scenario, int]] = {}
 preset_ids: dict[str, str] = {}
@@ -145,10 +145,10 @@ async def upload_csv(file: UploadFile = File(...)):
     """Validate an uploaded traffic CSV and store its bounded arrival profile."""
     contents = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(contents) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="CSV uploads must be 2 MB or smaller.")
+        raise HTTPException(status_code=413, detail="Dataset uploads must be 25 MB or smaller.")
     loop = asyncio.get_running_loop()
     try:
-        dataset = await loop.run_in_executor(executor, lambda: load_from_csv(contents))
+        dataset = await loop.run_in_executor(executor, lambda: load_traffic_dataset(contents, filename=file.filename))
         scenario = await loop.run_in_executor(executor, lambda: Scenario.from_dataset(dataset, name="custom"))
     except (UnicodeDecodeError, ValueError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error

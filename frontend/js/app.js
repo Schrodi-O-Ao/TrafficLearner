@@ -149,23 +149,16 @@ document.addEventListener('DOMContentLoaded', () => {
     byId('run-again-button').addEventListener('click', resetForAnotherRun);
   }
 
-  function handleFileSelected(event) {
+  async function handleFileSelected(event) {
     clearError();
     const file = event.target.files[0];
     if (!file) return;
 
-    if (file.name.toLowerCase().endsWith('.zip') || file.name.toLowerCase().endsWith('.tar')) {
-      showError('ZIP/Archive detected: please extract the archive on your computer and select the CSV file inside (e.g. "CN+ Dataset.csv").');
-      uploadInput.value = '';
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = e => {
-      const text = e.target.result;
-      const parsed = parseClientCsv(text);
+    try {
+      addLog(`Reading ${file.name}...`);
+      const parsed = await parseClientFile(file);
       if (parsed.error) {
-        showError(`CSV Notice: ${parsed.error}`);
+        showError(`Dataset notice: ${parsed.error}`);
         return;
       }
       uploadedDataset = parsed;
@@ -173,10 +166,10 @@ document.addEventListener('DOMContentLoaded', () => {
         csvFileName.textContent = `${file.name} (${parsed.type || 'Custom'}, ${parsed.recordCount} rows)`;
         csvBadge.classList.remove('hidden');
       }
-      addLog(`Dataset parsed: ${file.name} (${parsed.recordCount} entries, ${parsed.type}).`);
-    };
-    reader.onerror = () => showError('Failed to read selected file.');
-    reader.readAsText(file.slice(0, 500000)); // Read first 500KB for inspection
+      addLog(`Dataset parsed successfully: ${file.name} (${parsed.recordCount} entries, ${parsed.type}).`);
+    } catch (err) {
+      showError(`Failed to parse ${file.name}: ${err.message || 'Unsupported format'}`);
+    }
   }
 
   function clearUploadedFile() {
@@ -187,9 +180,146 @@ document.addEventListener('DOMContentLoaded', () => {
     addLog('Custom dataset removed. Reverting to preset selection.');
   }
 
-  /**
-   * Client-side CSV detection supporting standard schedules & CN+ Bremen dataset.
-   */
+  function mapClientDirection(dirStr) {
+    const s = String(dirStr || '').trim().toUpperCase();
+    if (['N', 'S', 'E', 'W'].includes(s)) return s;
+
+    const m = s.match(/(?:DIRECTION|DIR|ROUTE_?)\s*(\d+)/i);
+    if (m) {
+      const rawNum = parseInt(m[1], 10);
+      const num = s.includes('ROUTE') && rawNum < 15 ? rawNum + 1 : rawNum;
+      if ([1, 2, 3, 15, 16, 17].includes(num)) return 'N';
+      if ([4, 5, 6, 7].includes(num)) return 'W';
+      if ([8, 9, 10].includes(num)) return 'S';
+      if ([11, 12, 13, 14, 18, 19].includes(num)) return 'E';
+      return ['N', 'S', 'E', 'W'][(num - 1) % 4];
+    }
+
+    if (s.startsWith('N')) return 'N';
+    if (s.startsWith('S')) return 'S';
+    if (s.startsWith('E')) return 'E';
+    if (s.startsWith('W')) return 'W';
+    return null;
+  }
+
+  async function unzipClientBuffer(buf, targetPredicate) {
+    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    let eocdOffset = -1;
+    for (let i = buf.byteLength - 22; i >= 0; i--) {
+      if (view.getUint32(i, true) === 0x06054b50) {
+        eocdOffset = i;
+        break;
+      }
+    }
+    if (eocdOffset === -1) return null;
+    const cdOffset = view.getUint32(eocdOffset + 16, true);
+    const cdRecords = view.getUint16(eocdOffset + 10, true);
+    let p = cdOffset;
+    for (let i = 0; i < cdRecords; i++) {
+      if (view.getUint32(p, true) !== 0x02014b50) break;
+      const method = view.getUint16(p + 10, true);
+      const compSize = view.getUint32(p + 20, true);
+      const nameLen = view.getUint16(p + 28, true);
+      const extraLen = view.getUint16(p + 30, true);
+      const commentLen = view.getUint16(p + 32, true);
+      const localHeaderOffset = view.getUint32(p + 42, true);
+      const name = new TextDecoder().decode(buf.subarray(p + 46, p + 46 + nameLen));
+      p += 46 + nameLen + extraLen + commentLen;
+      if (targetPredicate(name)) {
+        const localNameLen = view.getUint16(localHeaderOffset + 26, true);
+        const localExtraLen = view.getUint16(localHeaderOffset + 28, true);
+        const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
+        const rawData = buf.subarray(dataStart, dataStart + compSize);
+        if (method === 0) return { name, data: rawData };
+        if (method === 8) {
+          const ds = new DecompressionStream('deflate-raw');
+          const decompressed = await new Response(new Blob([rawData]).stream().pipeThrough(ds)).arrayBuffer();
+          return { name, data: new Uint8Array(decompressed) };
+        }
+      }
+    }
+    return null;
+  }
+
+  function parseOdsXml(xmlText) {
+    const rowRegex = /<table:table-row[^>]*>([\s\S]*?)<\/table:table-row>/g;
+    let match;
+    let rowCount = 0;
+    const approachCounts = { N: 0, S: 0, E: 0, W: 0 };
+    let timeColIdx = 1;
+    let dirColIdx = 2;
+    let countColIdx = 3;
+
+    while ((match = rowRegex.exec(xmlText)) !== null) {
+      const rowContent = match[1];
+      const cellRegex = /<table:table-cell(?:[^>]*?number-columns-repeated="(\d+)")?[^>]*>(?:<text:p>([^<]*)<\/text:p>)?<\/table:table-cell>/g;
+      let cellMatch;
+      const cells = [];
+      while ((cellMatch = cellRegex.exec(rowContent)) !== null) {
+        const rep = parseInt(cellMatch[1] || '1', 10);
+        const text = cellMatch[2] || '';
+        for (let k = 0; k < Math.min(rep, 15); k++) cells.push(text);
+      }
+      if (cells.length < 3) continue;
+      rowCount++;
+      if (rowCount === 1) {
+        cells.forEach((c, idx) => {
+          const lower = c.toLowerCase();
+          if (lower.includes('time') || lower.includes('crossing') || lower.includes('second')) timeColIdx = idx;
+          if (lower.includes('direction') || lower.includes('dir') || lower.includes('approach')) dirColIdx = idx;
+          if (lower.includes('number') || lower.includes('count') || lower.includes('vehicle') || lower.includes('volume')) countColIdx = idx;
+        });
+        continue;
+      }
+      const dir = mapClientDirection(cells[dirColIdx]);
+      const count = parseFloat(cells[countColIdx]) || 1;
+      if (dir && approachCounts[dir] !== undefined) {
+        approachCounts[dir] += count;
+      }
+    }
+
+    const rates = {
+      N: Math.max(0.02, Math.min(0.25, Number((approachCounts.N / 12000).toFixed(4)))),
+      S: Math.max(0.02, Math.min(0.25, Number((approachCounts.S / 12000).toFixed(4)))),
+      E: Math.max(0.02, Math.min(0.25, Number((approachCounts.E / 12000).toFixed(4)))),
+      W: Math.max(0.02, Math.min(0.25, Number((approachCounts.W / 12000).toFixed(4)))),
+    };
+    return {
+      type: 'CN+ Bremen Dataset (ODS)',
+      recordCount: rowCount - 1,
+      rates: rates,
+    };
+  }
+
+  function parseSumoXml(xmlText) {
+    const vehRegex = /<vehicle[^>]*depart="([^"]+)"[^>]*route="([^"]+)"/g;
+    let match;
+    const approachCounts = { N: 0, S: 0, E: 0, W: 0 };
+    let countRecords = 0;
+    while ((match = vehRegex.exec(xmlText)) !== null) {
+      const route = match[2];
+      const dir = mapClientDirection(route);
+      if (dir && approachCounts[dir] !== undefined) {
+        approachCounts[dir] += 1;
+        countRecords++;
+      }
+    }
+    if (countRecords === 0) {
+      return { error: 'No vehicle departures found in SUMO route XML.' };
+    }
+    const rates = {
+      N: Math.max(0.02, Math.min(0.25, Number((approachCounts.N / 3600).toFixed(4)))),
+      S: Math.max(0.02, Math.min(0.25, Number((approachCounts.S / 3600).toFixed(4)))),
+      E: Math.max(0.02, Math.min(0.25, Number((approachCounts.E / 3600).toFixed(4)))),
+      W: Math.max(0.02, Math.min(0.25, Number((approachCounts.W / 3600).toFixed(4)))),
+    };
+    return {
+      type: 'SUMO Route Dataset (.rou.xml)',
+      recordCount: countRecords,
+      rates: rates,
+    };
+  }
+
   function parseClientCsv(text) {
     const lines = text.split(/\r?\n/).filter(line => line.trim().length > 0);
     if (lines.length < 2) return { error: 'CSV file is empty or has only headers.' };
@@ -200,23 +330,108 @@ document.addEventListener('DOMContentLoaded', () => {
     else if (firstLine.includes('\t')) delim = '\t';
 
     const headers = firstLine.split(delim).map(h => h.trim().toLowerCase().replace(/['"]/g, ''));
+    let timeCol = headers.findIndex(h => h.includes('time') || h.includes('second') || h.includes('crossing') || h.includes('timestamp'));
+    let dirCol = headers.findIndex(h => h.includes('direction') || h.includes('dir') || h.includes('approach') || h.includes('movement'));
+    let rateCol = headers.findIndex(h => h.includes('rate') || h.includes('count') || h.includes('number') || h.includes('volume') || h.includes('vehicle'));
 
-    // Check for CN+ Bremen or standard columns
-    const hasCrossingTiming = headers.some(h => h.includes('crossing') || h.includes('time'));
-    const hasDirection = headers.some(h => h.includes('direction') || h.includes('dir') || h.includes('approach'));
-
-    if (!hasCrossingTiming || !hasDirection) {
+    if (timeCol === -1 || dirCol === -1) {
       return {
-        error: `Could not detect time and direction columns in [${headers.slice(0, 5).join(', ')}]. Expected headers like "Crossing Timing, Vehicle Direction" or "time_seconds, direction, arrival_rate".`,
+        error: `Could not detect time and direction columns in [${headers.slice(0, 5).join(', ')}].`,
       };
     }
 
-    const isBremen = headers.some(h => h.includes('crossing') || h.includes('bremen'));
+    const approachCounts = { N: 0, S: 0, E: 0, W: 0 };
+    let countRecords = 0;
+    for (let i = 1; i < lines.length; i++) {
+      const parts = lines[i].split(delim);
+      if (parts.length <= Math.max(timeCol, dirCol)) continue;
+      const dir = mapClientDirection(parts[dirCol]);
+      let val = rateCol !== -1 ? parseFloat(parts[rateCol]) : 1.0;
+      if (isNaN(val) || val <= 0) val = 1.0;
+      if (dir && approachCounts[dir] !== undefined) {
+        approachCounts[dir] += val;
+        countRecords++;
+      }
+    }
+
+    const isBremen = headers.some(h => h.includes('crossing') || h.includes('bremen') || h.includes('dew'));
+    const isPrebinned = lines.length <= 150 && headers.some(h => h.includes('rate'));
+    let rates = { N: 0.08, S: 0.08, E: 0.06, W: 0.06 };
+    if (isPrebinned) {
+      rates = {
+        N: Number((approachCounts.N / (lines.length / 4)).toFixed(4)) || 0.08,
+        S: Number((approachCounts.S / (lines.length / 4)).toFixed(4)) || 0.08,
+        E: Number((approachCounts.E / (lines.length / 4)).toFixed(4)) || 0.06,
+        W: Number((approachCounts.W / (lines.length / 4)).toFixed(4)) || 0.06,
+      };
+    } else {
+      rates = {
+        N: Math.max(0.02, Math.min(0.25, Number((approachCounts.N / 12000).toFixed(4)))),
+        S: Math.max(0.02, Math.min(0.25, Number((approachCounts.S / 12000).toFixed(4)))),
+        E: Math.max(0.02, Math.min(0.25, Number((approachCounts.E / 12000).toFixed(4)))),
+        W: Math.max(0.02, Math.min(0.25, Number((approachCounts.W / 12000).toFixed(4)))),
+      };
+    }
+
     return {
       type: isBremen ? 'CN+ Bremen Dataset' : 'Standard Traffic Dataset',
-      recordCount: lines.length - 1,
-      rates: { N: 0.11, S: 0.10, E: 0.08, W: 0.07 },
+      recordCount: countRecords,
+      rates: rates,
     };
+  }
+
+  async function parseClientFile(file) {
+    const name = file.name.toLowerCase();
+
+    // 1. ZIP archive (e.g. "CN+ Dataset.zip")
+    if (name.endsWith('.zip')) {
+      const buf = new Uint8Array(await file.arrayBuffer());
+      // Prefer .ods
+      const odsEntry = await unzipClientBuffer(buf, n => n.toLowerCase().endsWith('.ods') && !n.includes('__MACOSX'));
+      if (odsEntry) {
+        const xmlEntry = await unzipClientBuffer(odsEntry.data, n => n === 'content.xml');
+        if (xmlEntry) {
+          return parseOdsXml(new TextDecoder().decode(xmlEntry.data));
+        }
+      }
+      // Prefer .csv
+      const csvEntry = await unzipClientBuffer(buf, n => n.toLowerCase().endsWith('.csv') && !n.includes('__MACOSX'));
+      if (csvEntry) {
+        return parseClientCsv(new TextDecoder().decode(csvEntry.data));
+      }
+      // Prefer SUMO route XML
+      const xmlEntry = await unzipClientBuffer(buf, n => (n.toLowerCase().endsWith('.rou.xml') || n.toLowerCase().endsWith('.xml')) && !n.includes('__MACOSX'));
+      if (xmlEntry) {
+        return parseSumoXml(new TextDecoder().decode(xmlEntry.data));
+      }
+      return { error: 'No recognized dataset (.ods, .csv, or .rou.xml) found inside ZIP.' };
+    }
+
+    // 2. OpenDocument Spreadsheet (.ods)
+    if (name.endsWith('.ods')) {
+      const buf = new Uint8Array(await file.arrayBuffer());
+      const xmlEntry = await unzipClientBuffer(buf, n => n === 'content.xml');
+      if (!xmlEntry) return { error: 'content.xml not found inside ODS file.' };
+      return parseOdsXml(new TextDecoder().decode(xmlEntry.data));
+    }
+
+    // 3. SUMO route XML (.rou.xml or .xml)
+    if (name.endsWith('.rou.xml') || name.endsWith('.xml')) {
+      const text = await file.text();
+      return parseSumoXml(text);
+    }
+
+    // 4. CSV, TSV, or TXT
+    const text = await file.text();
+    if (text.startsWith('PK\x03\x04')) {
+      const buf = new Uint8Array(await file.arrayBuffer());
+      const xmlEntry = await unzipClientBuffer(buf, n => n === 'content.xml');
+      if (xmlEntry) return parseOdsXml(new TextDecoder().decode(xmlEntry.data));
+    }
+    if (text.includes('<routes') || text.includes('<vehicle')) {
+      return parseSumoXml(text);
+    }
+    return parseClientCsv(text);
   }
 
   async function createAndRunScenario() {
