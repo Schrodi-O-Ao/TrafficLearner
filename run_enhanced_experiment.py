@@ -32,7 +32,7 @@ def run_command(cmd: list[str], description: str) -> bool:
 def main() -> None:
     """Parse experiment options, train model, and run paired evaluation."""
     parser = argparse.ArgumentParser(description="Run TrafficLearner experiment pipeline")
-    parser.add_argument("--agent_type", type=str, default="tabular", choices=["tabular", "neural"],
+    parser.add_argument("--agent_type", type=str, default="tabular", choices=["tabular"],
                         help="RL agent type")
     parser.add_argument("--episodes", type=int, default=50, help="Training episodes")
     parser.add_argument("--episode_length", type=int, default=900, help="Episode length in seconds")

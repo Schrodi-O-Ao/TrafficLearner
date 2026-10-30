@@ -205,7 +205,7 @@ class EnhancedTrainingManager:
 def main() -> None:
     """Parse training settings, optionally tune them, and export the final Q-table."""
     parser = argparse.ArgumentParser(description="Train a traffic signal controller")
-    parser.add_argument("--agent_type", choices=["tabular", "neural"], default="tabular", help="Controller type")
+    parser.add_argument("--agent_type", choices=["tabular"], default="tabular", help="Controller type")
     parser.add_argument("--episodes", type=int, default=200, help="Number of fresh training traffic schedules")
     parser.add_argument("--episode_length", type=int, default=3600, help="Training duration in seconds")
     parser.add_argument("--scenarios", nargs="+", default=["balanced", "ns_skew", "heavy", "spike"], help="Shared demand profiles used in rotation")
