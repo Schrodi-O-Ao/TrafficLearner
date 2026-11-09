@@ -37,7 +37,7 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=50, help="Training episodes")
     parser.add_argument("--episode_length", type=int, default=900, help="Episode length in seconds")
     parser.add_argument("--quick_test", action="store_true", help="Run with reduced episodes for quick verification")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--seed", type=int, default=1000, help="First training seed; evaluation reserves seeds 42 through 71")
     parser.add_argument("--policy_output", default=os.path.join("models", "tabular_policy.json"),
                         help="Path for trained policy export")
     
